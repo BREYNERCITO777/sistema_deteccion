@@ -1,0 +1,24 @@
+fastapi==0.115.6
+uvicorn[standard]==0.30.6
+
+# Mongo async
+motor==3.6.0
+pymongo==4.9.1
+
+# Settings / validación
+pydantic==2.9.2
+pydantic-settings==2.6.1
+email-validator==2.2.0
+
+# Auth JWT
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+# Uploads / imágenes
+python-multipart==0.0.12
+Pillow==10.4.0
+
+# IA / visión
+ultralytics==8.3.40
+opencv-python-headless==4.10.0.84

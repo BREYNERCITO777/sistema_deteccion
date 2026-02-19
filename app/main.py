@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import settings
+from app.core.lifecycle import lifespan
+
+from app.routers.auth import router as auth_router
+from app.routers.users import router as users_router
+from app.routers.inference import router as inference_router
+from app.routers.incidents import router as incidents_router
+from app.routers.alerts import router as alerts_router
+from app.routers.cameras import router as cameras_router
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="Sentinel AI Backend",
+        version="1.0.0",
+        lifespan=lifespan,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
+
+    api_prefix = settings.API_PREFIX
+    app.include_router(auth_router, prefix=api_prefix)
+    app.include_router(users_router, prefix=api_prefix)
+    app.include_router(inference_router, prefix=api_prefix)
+    app.include_router(incidents_router, prefix=api_prefix)
+    app.include_router(alerts_router, prefix=api_prefix)
+    app.include_router(cameras_router, prefix=api_prefix)
+
+    @app.get("/", tags=["default"])
+    def root():
+        return {"status": "ok", "name": "Sentinel AI Backend"}
+
+    return app
+
+
+app = create_app()

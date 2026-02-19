@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+runs/
+datasets/
+data/
+app/static/capturas/
+app/static/evidence/
+.git/
+.vscode/
