@@ -1,45 +1,82 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import OAuth2PasswordRequestForm
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from passlib.context import CryptContext
 
 from app.core.database import get_db
-from app.core.security import create_access_token, require_auth
-from app.models.schemas import UserRegister, UserLogin, UserOut, TokenOut
-from app.repositories.user_repository import UserRepository
+from app.core.config import settings
+from app.core.security import create_access_token, get_current_user
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["Auth"])
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-@router.post("/register", response_model=UserOut)
-async def register(payload: UserRegister, db: AsyncIOMotorDatabase = Depends(get_db)):
-    repo = UserRepository(db)
-
-    existing = await repo.get_by_email(payload.email)
-    if existing:
-        raise HTTPException(400, "Email ya registrado")
-
-    password_hash = pwd_context.hash(payload.password)
-    created = await repo.create(email=payload.email, password_hash=password_hash, role=payload.role)
-    return created
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
 
 
-@router.post("/login", response_model=TokenOut)
-async def login(payload: UserLogin, db: AsyncIOMotorDatabase = Depends(get_db)):
-    repo = UserRepository(db)
-    user = await repo.get_by_email(payload.email)
+def allowed_modules_for(role: str) -> list[str]:
+    # ✅ Fuente de verdad de permisos por rol (para tu tesis)
+    if role == "admin":
+        return [
+            "dashboard",
+            "cameras",
+            "incidents",
+            "evidence",
+            "alerts",
+            "settings",
+            "users",
+        ]
+    # operator
+    return [
+        "dashboard",
+        "incidents",
+        "evidence",
+        "alerts",
+    ]
+
+
+@router.post("/login")
+async def login(
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    # OAuth2PasswordRequestForm usa: username, password (aunque sea email)
+    user = await db[settings.USERS_COL].find_one({"email": form.username})
     if not user:
         raise HTTPException(401, "Credenciales inválidas")
 
-    if not pwd_context.verify(payload.password, user.get("password_hash", "")):
+    if not verify_password(form.password, user.get("password_hash", "")):
         raise HTTPException(401, "Credenciales inválidas")
 
-    token = create_access_token(sub=str(user["_id"]), role=user.get("role", "operator"))
-    return TokenOut(access_token=token)
+    role = user.get("role", "operator")
+    token = create_access_token(sub=str(user["_id"]), role=role)
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "_id": str(user["_id"]),
+            "email": user.get("email"),
+            "name": user.get("name", ""),
+            "role": role,
+        },
+        "allowed_modules": allowed_modules_for(role),
+    }
 
 
-@router.get("/me", response_model=UserOut)
-async def me(user=Depends(require_auth)):
-    return user
+@router.get("/me")
+async def me(user=Depends(get_current_user)):
+    role = user.get("role", "operator")
+    return {
+        "user": {
+            "_id": user["_id"],
+            "email": user.get("email"),
+            "name": user.get("name", ""),
+            "role": role,
+        },
+        "allowed_modules": allowed_modules_for(role),
+    }

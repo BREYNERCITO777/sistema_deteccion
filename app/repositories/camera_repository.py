@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
+from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.core.config import settings
@@ -24,6 +25,7 @@ class CameraRepository:
         self.col = db[settings.CAMERAS_COL]
 
     async def ensure_indexes(self) -> None:
+        # unique RTSP url
         await self.col.create_index("rtsp_url", unique=True)
         await self.col.create_index("created_at")
 
@@ -36,14 +38,20 @@ class CameraRepository:
         fps_target: int = 5,
         infer_every_n_frames: int = 5,
     ) -> Dict[str, Any]:
+        # ✅ normalización básica
+        name = name.strip()
+        rtsp_url = rtsp_url.strip()
+
         doc = {
             "name": name,
             "rtsp_url": rtsp_url,
-            "enabled": enabled,
+            "enabled": bool(enabled),
             "fps_target": int(fps_target),
             "infer_every_n_frames": int(infer_every_n_frames),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        # ⚠️ si rtsp_url está duplicado, Motor lanzará DuplicateKeyError
         res = await self.col.insert_one(doc)
         doc["_id"] = res.inserted_id
         return _serialize(doc)
@@ -57,19 +65,28 @@ class CameraRepository:
         try:
             d = await self.col.find_one({"_id": _oid(camera_id)})
             return _serialize(d) if d else None
-        except Exception:
+        except InvalidId:
+            # id mal formado
             return None
 
     async def update(self, camera_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            await self.col.update_one({"_id": _oid(camera_id)}, {"$set": patch})
+            # ✅ normaliza campos si vienen
+            if "name" in patch and isinstance(patch["name"], str):
+                patch["name"] = patch["name"].strip()
+            if "rtsp_url" in patch and isinstance(patch["rtsp_url"], str):
+                patch["rtsp_url"] = patch["rtsp_url"].strip()
+
+            res = await self.col.update_one({"_id": _oid(camera_id)}, {"$set": patch})
+            if res.matched_count == 0:
+                return None
             return await self.get(camera_id)
-        except Exception:
+        except InvalidId:
             return None
 
     async def delete(self, camera_id: str) -> bool:
         try:
             res = await self.col.delete_one({"_id": _oid(camera_id)})
             return res.deleted_count == 1
-        except Exception:
+        except InvalidId:
             return False

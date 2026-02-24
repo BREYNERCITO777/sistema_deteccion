@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     CAMERAS_COL: str = "cameras"
     USERS_COL: str = "users"
     ALERTS_COL: str = "alerts"
+    SETTINGS_COL: str = "settings"
 
     # Static / evidencias
     STATIC_DIR: str = "app/static"

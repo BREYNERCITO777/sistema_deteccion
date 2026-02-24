@@ -51,6 +51,16 @@ class IncidentRepository:
         docs = await cursor.to_list(length=limit)
         return [_serialize(d) for d in docs]
 
-    async def delete_all(self) -> int:
-        res = await self.col.delete_many({})
-        return int(res.deleted_count)
+    async def get(self, incident_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            d = await self.col.find_one({"_id": _oid(incident_id)})
+            return _serialize(d) if d else None
+        except Exception:
+            return None
+
+    async def delete(self, incident_id: str) -> bool:
+        try:
+            res = await self.col.delete_one({"_id": _oid(incident_id)})
+            return res.deleted_count == 1
+        except Exception:
+            return False
