@@ -14,7 +14,7 @@ from app.routers.inference import router as inference_router
 from app.routers.incidents import router as incidents_router
 from app.routers.alerts import router as alerts_router
 from app.routers.cameras import router as cameras_router
-from app.routers.ws import router as ws_router
+
 
 
 def create_app() -> FastAPI:
@@ -46,7 +46,6 @@ def create_app() -> FastAPI:
     app.include_router(incidents_router, prefix=api_prefix)
     app.include_router(alerts_router, prefix=api_prefix)
     app.include_router(cameras_router, prefix=api_prefix)
-    app.include_router(ws_router, prefix=api_prefix)
     app.include_router(settings_router, prefix=api_prefix)
     
     @app.get("/", tags=["default"])

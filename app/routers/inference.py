@@ -11,10 +11,9 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
 from app.core.database import get_db
-from app.core.websocket_manager import manager
 from app.core.config import settings
-
 from app.core.security import decode_token  # ✅ para validar JWT (query token o bearer)
+
 from app.repositories.incident_repository import IncidentRepository
 from app.repositories.alert_repository import alert_repo
 from app.services.detection_service import DetectionService
@@ -80,7 +79,6 @@ async def _get_user_from_token(token: str, db: AsyncIOMotorDatabase) -> Dict[str
     if not user:
         raise HTTPException(status_code=401, detail="Usuario no existe")
 
-    # normalizar
     user["_id"] = str(user["_id"])
     user.pop("password_hash", None)
     return user
@@ -92,7 +90,7 @@ async def require_roles_stream(
     token: Optional[str] = Query(default=None),
 ) -> Dict[str, Any]:
     """
-    ✅ Para streaming: permite autenticar por:
+    ✅ Para streaming / detectar: permite autenticar por:
     - Header Authorization: Bearer <jwt>
     - Query param ?token=<jwt> (para <img src="...">)
     """
@@ -108,8 +106,7 @@ async def require_roles_stream(
 
 
 # ==========================================
-# ENDPOINT 1: Detección por foto estática
-# (si quieres, puedes restringirlo solo a admin)
+# ENDPOINT: Detección por foto estática
 # ==========================================
 @router.post("/detectar")
 async def detectar(
@@ -136,10 +133,9 @@ async def detectar(
                 "evidence_url": None,
             }
 
-        # Guardar evidencia (imagen con cajas)
+        # Guardar evidencia
         evidence_url = save_evidence(frame, detections)
 
-        # top detection
         top = max(detections, key=lambda d: d["confidence"])
         weapon_type = top["class_name"]
         confidence = float(top["confidence"])
@@ -167,19 +163,6 @@ async def detectar(
             read=False,
         )
 
-        # WebSocket broadcast
-        await manager.broadcast(
-            {
-                "type": "ALERTA",
-                "weapon_type": weapon_type,
-                "confidence": confidence,
-                "evidence_url": evidence_url,
-                "camera_id": None,
-                "timestamp": incident.get("timestamp", time.time()),
-                "severity": severity,
-            }
-        )
-
         return {
             "detections": detections,
             "latency_infer_ms": infer_ms,
@@ -196,11 +179,9 @@ async def detectar(
 # ✅ Resolver fuente real: camera_id -> rtsp_url en Mongo
 # ==========================================================
 async def _resolve_camera_source(camera_id: str, db: AsyncIOMotorDatabase) -> int | str:
-    # Caso especial: webcam local
     if camera_id == "0":
         return 0
 
-    # Buscar en colección CAMERAS por _id
     try:
         oid = ObjectId(camera_id)
     except Exception:
@@ -214,7 +195,6 @@ async def _resolve_camera_source(camera_id: str, db: AsyncIOMotorDatabase) -> in
     if not rtsp:
         raise HTTPException(status_code=400, detail="La cámara no tiene rtsp_url")
 
-    # Si guardaste "0", "1", etc en string, lo convertimos a int
     if isinstance(rtsp, str) and rtsp.isdigit():
         return int(rtsp)
 
@@ -222,7 +202,7 @@ async def _resolve_camera_source(camera_id: str, db: AsyncIOMotorDatabase) -> in
 
 
 # ==========================================
-# Generador de Video en Vivo con Control de Estado
+# Generador de Video en Vivo
 # ==========================================
 async def generar_frames(
     request: Request,
@@ -249,32 +229,31 @@ async def generar_frames(
                 continue
             image_bytes = buffer.tobytes()
 
-            procesado_frame, raw_detections, infer_ms = service.detect(model, image_bytes)
+            _, raw_detections, _infer_ms = service.detect(model, image_bytes)
             detections = [d for d in raw_detections if d.get("confidence", 0.0) >= MIN_CONFIDENCE]
 
-            frame_para_dibujar = frame.copy()
+            frame_draw = frame.copy()
 
             if detections:
                 for det in detections:
                     box = det.get("box", [])
                     if len(box) == 4:
                         x1, y1, x2, y2 = map(int, box)
-                        cv2.rectangle(frame_para_dibujar, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        cv2.rectangle(frame_draw, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
                         etiqueta = f"{det['class_name']} {(det['confidence']*100):.0f}%"
-                        (tw, th), baseline = cv2.getTextSize(
-                            etiqueta, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
-                        )
+                        (tw, th), baseline = cv2.getTextSize(etiqueta, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
                         y_text = max(y1 - 10, th + 10)
+
                         cv2.rectangle(
-                            frame_para_dibujar,
+                            frame_draw,
                             (x1, y_text - th - 8),
                             (x1 + tw + 8, y_text + baseline),
                             (0, 0, 0),
                             -1,
                         )
                         cv2.putText(
-                            frame_para_dibujar,
+                            frame_draw,
                             etiqueta,
                             (x1 + 4, y_text - 4),
                             cv2.FONT_HERSHEY_SIMPLEX,
@@ -291,10 +270,10 @@ async def generar_frames(
                     confidence = float(top["confidence"])
                     severity = _severity_from_conf(confidence)
 
-                    evidence_url = save_evidence(frame_para_dibujar, detections)
+                    evidence_url = save_evidence(frame_draw, detections)
 
                     incident_repo = IncidentRepository(db)
-                    incident = await incident_repo.create(
+                    await incident_repo.create(
                         weapon_type=weapon_type,
                         confidence=confidence,
                         evidence_url=evidence_url,
@@ -313,28 +292,15 @@ async def generar_frames(
                         read=False,
                     )
 
-                    await manager.broadcast(
-                        {
-                            "type": "ALERTA",
-                            "weapon_type": weapon_type,
-                            "confidence": confidence,
-                            "evidence_url": evidence_url,
-                            "camera_id": camera_id,
-                            "timestamp": incident.get("timestamp", current_time),
-                            "severity": severity,
-                        }
-                    )
-
                     last_alert_time = current_time
 
-            ret2, buffer2 = cv2.imencode(".jpg", frame_para_dibujar)
+            ret2, buffer2 = cv2.imencode(".jpg", frame_draw)
             if not ret2:
                 continue
-            frame_listo = buffer2.tobytes()
 
             yield (
                 b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame_listo + b"\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + buffer2.tobytes() + b"\r\n"
             )
 
             await asyncio.sleep(0.01)
@@ -342,7 +308,6 @@ async def generar_frames(
     finally:
         cap.release()
         active_streams[camera_id] = False
-        print(f"--- CONEXIÓN CERRADA Y RECURSOS LIBERADOS PARA CÁMARA {camera_id} ---")
 
 
 @router.get("/stream/{camera_id}")
@@ -350,16 +315,14 @@ async def video_stream(
     camera_id: str,
     request: Request,
     db: AsyncIOMotorDatabase = Depends(get_db),
-    _user: Dict[str, Any] = Depends(require_roles_stream),  # ✅ admin/operator pueden VER
+    _user: Dict[str, Any] = Depends(require_roles_stream),
 ):
     model = getattr(request.app.state, "yolo_model", None)
     if model is None:
         raise HTTPException(status_code=500, detail="Modelo YOLO no cargado")
 
-    # ✅ activar semáforo
     request.app.state.active_streams[camera_id] = True
 
-    # ✅ ahora sí: rtsp_url real desde Mongo (o 0)
     camera_source = await _resolve_camera_source(camera_id, db)
 
     return StreamingResponse(
