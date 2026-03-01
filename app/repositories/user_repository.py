@@ -14,6 +14,12 @@ def _oid(id_: str) -> ObjectId:
 def _sanitize_user(doc: Dict[str, Any]) -> Dict[str, Any]:
     doc["_id"] = str(doc["_id"])
     doc.pop("password_hash", None)
+    # deja estado, role, email, name, etc.
+    if "estado" in doc:
+        try:
+            doc["estado"] = int(doc["estado"])
+        except Exception:
+            doc["estado"] = 1
     return doc
 
 
@@ -25,14 +31,28 @@ class UserRepository:
         self.db = db
         self.col = db[settings.USERS_COL]
 
-    async def create(self, *, email: str, password_hash: str, role: str) -> Dict[str, Any]:
-        doc = {"email": email, "password_hash": password_hash, "role": role}
+    async def create(
+        self,
+        *,
+        email: str,
+        password_hash: str,
+        role: str,
+        name: str = "",
+        estado: int = 1,
+    ) -> Dict[str, Any]:
+        doc = {
+            "email": (email or "").strip().lower(),
+            "password_hash": password_hash,
+            "role": role,
+            "name": name,
+            "estado": int(estado),
+        }
         res = await self.col.insert_one(doc)
         doc["_id"] = res.inserted_id
         return _sanitize_user(doc)
 
     async def get_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        return await self.col.find_one({"email": email})
+        return await self.col.find_one({"email": (email or "").strip().lower()})
 
     async def get_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         try:
@@ -46,6 +66,11 @@ class UserRepository:
         docs = await cursor.to_list(length=limit)
         for d in docs:
             d["_id"] = str(d["_id"])
+            if "estado" in d:
+                try:
+                    d["estado"] = int(d["estado"])
+                except Exception:
+                    d["estado"] = 1
         return docs
 
     async def delete(self, user_id: str) -> bool:

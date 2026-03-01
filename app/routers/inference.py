@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import asyncio
 import cv2
@@ -12,7 +13,7 @@ from bson import ObjectId
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.security import decode_token  # ✅ para validar JWT (query token o bearer)
+from app.core.security import decode_token
 
 from app.repositories.incident_repository import IncidentRepository
 from app.repositories.alert_repository import alert_repo
@@ -38,7 +39,7 @@ def _severity_from_conf(conf: float) -> str:
     return "low"
 
 
-def _alert_title(weapon_type: str, severity: str) -> str:
+def _alert_title(_weapon_type: str, severity: str) -> str:
     if severity == "critical":
         return "Detección Crítica"
     if severity == "high":
@@ -113,7 +114,7 @@ async def detectar(
     request: Request,
     file: UploadFile = File(...),
     db: AsyncIOMotorDatabase = Depends(get_db),
-    _user: Dict[str, Any] = Depends(require_roles_stream),  # ✅ admin/operator ok
+    _user: Dict[str, Any] = Depends(require_roles_stream),
 ):
     t0 = time.time()
     try:
@@ -133,7 +134,6 @@ async def detectar(
                 "evidence_url": None,
             }
 
-        # Guardar evidencia
         evidence_url = save_evidence(frame, detections)
 
         top = max(detections, key=lambda d: d["confidence"])
@@ -141,7 +141,6 @@ async def detectar(
         confidence = float(top["confidence"])
         severity = _severity_from_conf(confidence)
 
-        # Crear incidente
         incident_repo = IncidentRepository(db)
         incident = await incident_repo.create(
             weapon_type=weapon_type,
@@ -150,7 +149,6 @@ async def detectar(
             camera_id=None,
         )
 
-        # Crear alerta en BD
         await alert_repo.create(
             db,
             title=_alert_title(weapon_type, severity),
@@ -171,6 +169,8 @@ async def detectar(
             "incident_id": str(incident["_id"]),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -179,7 +179,16 @@ async def detectar(
 # ✅ Resolver fuente real: camera_id -> rtsp_url en Mongo
 # ==========================================================
 async def _resolve_camera_source(camera_id: str, db: AsyncIOMotorDatabase) -> int | str:
+    # ⚠️ En servidores (Render) no existe webcam "0"
+    # Activa ALLOW_WEBCAM=1 solo en local si deseas usar cámara laptop.
+    allow_webcam = os.getenv("ALLOW_WEBCAM", "0") == "1"
+
     if camera_id == "0":
+        if not allow_webcam:
+            raise HTTPException(
+                status_code=400,
+                detail='camera_id="0" solo permitido en local (ALLOW_WEBCAM=1). En servidor usa RTSP/IP cam.',
+            )
         return 0
 
     try:
@@ -201,8 +210,18 @@ async def _resolve_camera_source(camera_id: str, db: AsyncIOMotorDatabase) -> in
     return str(rtsp)
 
 
+def _encode_mjpeg_frame(jpg_bytes: bytes) -> bytes:
+    return (
+        b"--frame\r\n"
+        b"Content-Type: image/jpeg\r\n"
+        b"Content-Length: " + str(len(jpg_bytes)).encode() + b"\r\n\r\n"
+        + jpg_bytes
+        + b"\r\n"
+    )
+
+
 # ==========================================
-# Generador de Video en Vivo
+# Generador MJPEG estable (corta al cerrar modal)
 # ==========================================
 async def generar_frames(
     request: Request,
@@ -212,24 +231,53 @@ async def generar_frames(
     db: AsyncIOMotorDatabase,
 ):
     cap = cv2.VideoCapture(camera_source)
-    last_alert_time = 0
+
+    # reduce lag RTSP (si aplica)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+
+    last_alert_time = 0.0
     COOLDOWN_SECONDS = 5.0
 
+    # FPS stream
+    fps_target = float(os.getenv("STREAM_FPS", "12"))
+    fps_target = max(2.0, min(30.0, fps_target))
+    frame_interval = 1.0 / fps_target
+    next_frame_time = time.time()
+
     active_streams = getattr(request.app.state, "active_streams", {})
+    active_streams[camera_id] = True
 
     try:
-        while cap.isOpened() and active_streams.get(camera_id, False):
-            success, frame = cap.read()
-            if not success:
-                await asyncio.sleep(0.1)
+        while True:
+            if await request.is_disconnected():
+                break
+
+            if not active_streams.get(camera_id, False):
+                break
+
+            # control fps real
+            now = time.time()
+            sleep_for = next_frame_time - now
+            if sleep_for > 0:
+                await asyncio.sleep(min(sleep_for, 0.25))
+            next_frame_time = max(next_frame_time + frame_interval, time.time())
+
+            # OpenCV bloquea -> thread
+            success, frame = await asyncio.to_thread(cap.read)
+            if not success or frame is None:
+                await asyncio.sleep(0.2)
                 continue
 
-            ret, buffer = cv2.imencode(".jpg", frame)
+            ret, buffer = await asyncio.to_thread(cv2.imencode, ".jpg", frame)
             if not ret:
                 continue
             image_bytes = buffer.tobytes()
 
-            _, raw_detections, _infer_ms = service.detect(model, image_bytes)
+            # infer -> thread
+            _, raw_detections, _infer_ms = await asyncio.to_thread(service.detect, model, image_bytes)
             detections = [d for d in raw_detections if d.get("confidence", 0.0) >= MIN_CONFIDENCE]
 
             frame_draw = frame.copy()
@@ -270,7 +318,8 @@ async def generar_frames(
                     confidence = float(top["confidence"])
                     severity = _severity_from_conf(confidence)
 
-                    evidence_url = save_evidence(frame_draw, detections)
+                    # guardar evidencia (foto)
+                    evidence_url = await asyncio.to_thread(save_evidence, frame_draw, detections)
 
                     incident_repo = IncidentRepository(db)
                     await incident_repo.create(
@@ -294,19 +343,17 @@ async def generar_frames(
 
                     last_alert_time = current_time
 
-            ret2, buffer2 = cv2.imencode(".jpg", frame_draw)
+            ret2, buffer2 = await asyncio.to_thread(cv2.imencode, ".jpg", frame_draw)
             if not ret2:
                 continue
 
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + buffer2.tobytes() + b"\r\n"
-            )
-
-            await asyncio.sleep(0.01)
+            yield _encode_mjpeg_frame(buffer2.tobytes())
 
     finally:
-        cap.release()
+        try:
+            cap.release()
+        except Exception:
+            pass
         active_streams[camera_id] = False
 
 
@@ -321,11 +368,16 @@ async def video_stream(
     if model is None:
         raise HTTPException(status_code=500, detail="Modelo YOLO no cargado")
 
-    request.app.state.active_streams[camera_id] = True
-
     camera_source = await _resolve_camera_source(camera_id, db)
+
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
 
     return StreamingResponse(
         generar_frames(request, camera_id, camera_source, model, db),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=headers,
     )

@@ -19,7 +19,6 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def allowed_modules_for(role: str) -> list[str]:
-    # ✅ Fuente de verdad de permisos por rol (para tu tesis)
     if role == "admin":
         return [
             "dashboard",
@@ -30,7 +29,6 @@ def allowed_modules_for(role: str) -> list[str]:
             "settings",
             "users",
         ]
-    # operator
     return [
         "dashboard",
         "incidents",
@@ -39,18 +37,32 @@ def allowed_modules_for(role: str) -> list[str]:
     ]
 
 
+def _is_inactive(user: dict) -> bool:
+    # ✅ estado: 1=activo, 0=inactivo (default activo si no existe)
+    try:
+        return int(user.get("estado", 1)) == 0
+    except Exception:
+        return False
+
+
 @router.post("/login")
 async def login(
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
     # OAuth2PasswordRequestForm usa: username, password (aunque sea email)
-    user = await db[settings.USERS_COL].find_one({"email": form.username})
+    email = (form.username or "").strip().lower()
+
+    user = await db[settings.USERS_COL].find_one({"email": email})
     if not user:
-        raise HTTPException(401, "Credenciales inválidas")
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+    # ✅ bloquear login si está inactivo
+    if _is_inactive(user):
+        raise HTTPException(status_code=403, detail="Usuario inactivo")
 
     if not verify_password(form.password, user.get("password_hash", "")):
-        raise HTTPException(401, "Credenciales inválidas")
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
     role = user.get("role", "operator")
     token = create_access_token(sub=str(user["_id"]), role=role)
@@ -63,6 +75,7 @@ async def login(
             "email": user.get("email"),
             "name": user.get("name", ""),
             "role": role,
+            "estado": int(user.get("estado", 1)),
         },
         "allowed_modules": allowed_modules_for(role),
     }
@@ -70,6 +83,10 @@ async def login(
 
 @router.get("/me")
 async def me(user=Depends(get_current_user)):
+    # ✅ bloquear sesión si quedó inactivo luego
+    if _is_inactive(user):
+        raise HTTPException(status_code=401, detail="Usuario inactivo")
+
     role = user.get("role", "operator")
     return {
         "user": {
@@ -77,6 +94,7 @@ async def me(user=Depends(get_current_user)):
             "email": user.get("email"),
             "name": user.get("name", ""),
             "role": role,
+            "estado": int(user.get("estado", 1)),
         },
         "allowed_modules": allowed_modules_for(role),
     }
